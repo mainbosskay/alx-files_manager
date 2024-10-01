@@ -112,10 +112,145 @@ class FilesController {
       const dataFile = Buffer.from(data, 'base64');
 
       const existsDir = await FilesController.pathExists(uploadPath);
-      if (!dirExists) {
+      if (!existsDir) {
         await fs.promises.mkdir(uploadPath, { recursive: true });
       }
       FilesController.saveFileToDisk(res, fullFilePath, dataFile, newFile);
+    }
+  }
+
+  static async getShow(req, res) {
+    const fileId = req.params.id;
+    const user = await FilesController.getUserFromToken(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const fileCollection = await dbClient.filesCollection();
+    const fileData = await fileCollection.findOne({
+      _id: ObjectId(fileId),
+      userId: user._id.toString(),
+    });
+
+    if (!fileData) {
+      res.status(404).json({ error: 'Not found' });
+    } else {
+      fileData.id = fileData._id;
+      delete fileData._id;
+      delete fileData.localPath;
+      res.status(200).json(fileData);
+    }
+  }
+
+  static async getIndex(req, res) {
+    const user = await FilesController.getUserFromToken(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const {
+      parentId, page,
+    } = req.query;
+    const fileCollection = await dbClient.filesCollection();
+
+    const itemsPerPage = 20;
+    const currPage = page || 1;
+    const skipCount = (currPage - 1) * itemsPerPage;
+
+    let qryFilter;
+    if (!parentId) {
+      qryFilter = { userId: user._id.toString() };
+    } else {
+      qryFilter = { userId: user._id.toString(), parentId };
+    }
+
+    const fileResult = await fileCollection.aggregate([
+      { $match: qryFilter },
+      { $skip: skipCount },
+      { $limit: itemsPerPage },
+    ]).toArray();
+
+    const fmtdFiles = fileResult.map((file) => {
+      const newFile = { ...file, id: file._id };
+      delete newFile._id;
+      delete newFile.localPath;
+      return newFile;
+    });
+    res.status(200).json(fmtdFiles);
+  }
+
+  static async updateFileVis(req, res, visStats) {
+    const fileId = req.params.id;
+    const user = await FilesController.getUserFromToken(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const fileCollection = await dbClient.filesCollection();
+    const fileInfo = await fileCollection.findOne({
+      userId: user._id.toString(),
+      _id: ObjectId(fileId),
+    });
+    if (!fileInfo) {
+      res.status(404).json({ error: 'Not found' });
+    } else {
+      const visUpdate = { $set: { isPublic: visStats } };
+      await fileCollection.updateOne({ _id: ObjectId(fileId) }, visUpdate);
+      const updtFileVis = await fileCollection.findOne({ _id: ObjectId(fileId) });
+      updtFileVis.id = updtFileVis._id;
+      delete updtFileVis._id;
+      res.status(200).json(updtFileVis);
+    }
+  }
+
+  static putPublish(req, res) {
+    FilesController.updateFileVis(req, res, true);
+  }
+
+  static putUnpublish(req, res) {
+    FilesController.updateFileVis(req, res, false);
+  }
+
+  static async getFile(req, res) {
+    const fileId = req.params.id;
+    const { size } = req.query;
+    if (!fileId) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+
+    const user = await FilesController.getUserFromToken(req);
+    const fileCollection = await dbClient.filesCollection();
+    const fileDits = await fileCollection.findOne({ _id: ObjectId(fileId) });
+    if (!fileDits) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    if (!user && fileDits.isPublic === false) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    if (fileDits.isPublic === false && user && fileDits.userId !== user._id.toString()) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    if (fileDits.type === 'folder') {
+      res.status(400).json({ error: 'A folder doesn\'t have content' });
+      return;
+    }
+
+    const targetPath = size && fileDits.type === 'image'
+      ? `${fileDits.localPath}_${size}`
+      : fileDits.localPath;
+
+    if (!(await FilesController.pathExists(targetPath))) {
+      res.status(404).json({ error: 'Not found' });
+    } else {
+      res.set('Content-Type', mime.lookup(fileDits.name));
+      res.status(200).sendFile(targetPath);
     }
   }
 }
